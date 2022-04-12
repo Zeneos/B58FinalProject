@@ -1,0 +1,6018 @@
+##################################################################### 
+# 
+# CSCB58 Winter 2022 Assembly Final Project 
+# University of Toronto, Scarborough 
+# 
+# Student: Howie Chen, 1007477687, chencun1, howie.chen@mail.utoronto.ca 
+# 
+# Bitmap Display Configuration: 
+# - Unit width in pixels: 4
+# - Unit height in pixels: 4
+# - Display width in pixels: 512 
+# - Display height in pixels: 512 
+# - Base Address for Display: 0x10008000 ($gp) 
+# 
+# Which milestones have been reached in this submission? 
+# (See the assignment handout for descriptions of the milestones) 
+# - Milestone 1/2/3 
+# 
+# Which approved features have been implemented for milestone 3? 
+# (See the assignment handout for the list of additional features) 
+# 1. Health/Score	[2]
+# 2. Fail Condition 	[1]
+# 3. Win Condition  	[1]
+# 4. Moving platforms	[2]
+# 5. Enemies shoot	[2]
+# 6. Double jump	[1]
+# 
+# 
+# Link to video demonstration for final submission: 
+# - https://play.library.utoronto.ca/watch/5364b96b077cb6d34b3b4ad1f4ac7f6f
+# 
+# Are you OK with us sharing the video with people outside course staff? 
+# - yes, and please share this project github link as well! 
+# 
+# Any additional information that the TA needs to know: 
+# - A/D move side to side, Q/W/E jump left/up/right, red kills, green wins 
+# 
+##################################################################### 
+
+# Global registers
+# $s0 - location of the address to store memory variables
+# $s1 - position of the player pixel
+# $s2 - key input
+# $s3 - time
+# $s4 - laser 1 pos
+# $s5 - laser 2 pos
+# $s6 - game timer, from 0 to 240
+
+.eqv  BASE_ADDRESS  0x10008000	# Base address for the bitmap
+
+.data
+	padding:	.space 66000	# Empty space to prevent the game data from being overwritten cause bitmap
+	variables:	.space 100	# 0: base address, 4-12: jump right/up/left tracker, 16: lives, 20: invuln timer
+					# 24: momentum tracker, 28: double nump token, 32: game is over when 1
+					# 36+: enemy pos every 4
+	
+ 
+.text 
+
+.globl main
+
+main:
+	# Reset everything
+	li $s0, 0
+	li $s1, 0
+	li $s2, 0
+	li $s3, 0
+	li $s4, 0
+	li $s5, 0
+	li $s6, 0
+	
+	# Get base address
+	li $s1, BASE_ADDRESS
+	
+	# Load variables
+	la $s0, variables
+	
+	# Store base address
+	sw $s1, 0($s0)
+	
+	# Store 0 vars
+	sw $zero, 4($s0)
+	sw $zero, 8($s0)
+	sw $zero, 12($s0)
+	sw $zero, 20($s0)
+	sw $zero, 24($s0)
+	sw $zero, 32($s0)
+	
+	# Store non 0 vars
+	li $t0, 3
+	sw $t0, 16($s0)
+	li $t0, 1
+	sw $t0, 28($s0)
+	
+	# Spawn the player pixel
+	addi $s1, $s1, 61960
+	
+	# Spawn enemy
+	lw $t0, 0($s0)
+	addi $t0, $t0, 12028
+	sw $t0, 36($s0)
+	addi $t0, $t0, -3060
+	sw $t0, 40($s0)
+	
+	# Clear the screen
+	jal clear_screen
+	
+	# Draw
+	jal draw_floor
+	jal draw_menu
+	jal set_plats
+	
+	# Run the game
+	jal run_cycle
+
+	li $v0, 10 # terminate the program gracefully 
+	syscall
+	
+	
+	
+###################################################################
+	
+run_cycle:	# Run the game cycle
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+run_cycle_loop:	# Start of the game loop
+
+	# Keeping time
+	li $v0, 30
+	syscall
+	move $a0, $s3
+	
+	# Check for key input
+	li $t0, 0xffff0000
+	lw $t1, 0($t0)
+	bne $t1, 1, run_cycle_next
+	lw $s2, 4($t0)
+	
+	# Check for restart command
+	beq $s2, 0x70, main
+	
+	# Check for movement commands
+	jal check_move
+	
+run_cycle_next:	# Skip movement checks
+
+	# Don't move plats if game is over
+	lw $t0, 32($s0)
+	addi $t0, $t0, -1
+	beqz $t0, run_cycle_next_2
+
+	# Move platforms
+	jal move_plat
+	
+	# Move enemies
+	jal check_enemy
+	
+	# Clear the shot if
+	li $t0, 140
+	div $s6, $t0
+	mfhi $t0
+	bnez $t0, run_cycle_next_2
+	jal clear_shot
+	
+run_cycle_next_2:	# Jump to
+
+	# Check if win
+	jal check_win
+
+	# Check if damage
+	jal check_damage
+	
+	# Check if jumping
+	jal check_jump
+	
+	# Check if landed
+	jal check_double
+	
+	# Decrement invuln counter
+	jal invuln_counter
+
+	# Increment counter or reset if at max
+	jal run_counter
+	
+	# Check counter
+	jal momentum_counter
+	
+	# Draw the player
+	jal draw_player
+
+	# Wait to next cycle
+	li $v0, 30
+	syscall
+	move $a0, $t0
+	sub $t0, $t0, $s3
+	
+	addi $t1, $zero, 25
+	sub $t0, $t1, $t0
+	bgtz $t0, run_cycle_default_wait
+	li $t0, 25
+	
+run_cycle_default_wait:
+	
+	li $v0, 32
+	addi $a0, $t0, 0
+	syscall
+	j run_cycle_loop
+	
+run_cycle_stop:	# Stop the program
+
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra	
+	
+	
+	
+######################################################################
+#### CALCULATION FUNCTIONS ###########################################
+######################################################################
+
+
+
+check_enemy:	# Move the enemies
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Enemy shoots every 120th frame
+	li $t0, 120
+	div $s6, $t0
+	mfhi $t0
+	beqz $t0, check_enemy_shoot
+
+	# Move enemies every 8th frame
+	li $t0, 8
+	div $s6, $t0
+	mfhi $t0
+	beq $t0, $zero, check_enemy_1
+	
+check_enemy_next:	# Jump to
+	
+	# Move enemies every 3th frame
+	li $t0, 3
+	div $s6, $t0
+	mfhi $t0
+	beq $t0, $zero, check_enemy_2
+	
+check_enemy_end:	# Function end
+
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+check_enemy_shoot:
+
+	# Get the enemy pos
+	lw $t0, 36($s0)
+	li $t1, 512
+	div $t0, $t1
+	mfhi $t1
+	
+	# Get the starting position
+	lw $t2, 36($s0)
+	addi $s4, $t2, 0
+	
+	# Get the end position
+	addi $t3, $t2, 65536
+	
+	# Get black and red
+	li $t4, 0x00fe0000
+	li $t5, 0x00000000
+	
+check_enemy_shoot_loop:	# Loop for drawing plats
+
+	# End loop
+	beq $t2, $t3, check_enemy_shoot_loop_end
+
+	# Draw a plat if tile is black
+	lw $t6, 0($t2)
+	beq $t5, $t6, check_enemy_shoot_loop_draw
+
+	# Next loop
+	addi $t2, $t2, 512
+	j check_enemy_shoot_loop
+	
+check_enemy_shoot_loop_end:	# End of loop
+
+	# Return
+	j check_enemy_shoot_2
+	
+check_enemy_shoot_loop_draw:	# Draw red
+
+	# Draw and end
+	sw $t4, 0($t2)
+	j check_enemy_shoot_loop
+	
+check_enemy_shoot_2:
+
+	# Get the enemy pos
+	lw $t0, 40($s0)
+	li $t1, 512
+	div $t0, $t1
+	mfhi $t1
+	
+	# Get the starting position
+	lw $t2, 40($s0)
+	addi $s5, $t2, 0
+	
+	# Get the end position
+	addi $t3, $t2, 65536
+	
+	# Get black and red
+	li $t4, 0x00fe0000
+	li $t5, 0x00000000
+	
+check_enemy_shoot_2_loop:	# Loop for drawing plats
+
+	# End loop
+	beq $t2, $t3, check_enemy_shoot_2_loop_end
+
+	# Draw a plat if tile is black
+	lw $t6, 0($t2)
+	beq $t5, $t6, check_enemy_shoot_2_loop_draw
+
+	# Next loop
+	addi $t2, $t2, 512
+	j check_enemy_shoot_2_loop
+	
+check_enemy_shoot_2_loop_end:	# End of loop
+
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+check_enemy_shoot_2_loop_draw:	# Draw red
+
+	# Draw and end
+	sw $t4, 0($t2)
+	j check_enemy_shoot_2_loop
+	
+check_enemy_1:	# Move enemy
+
+	# Get player pos
+	li $t0, 512
+	div $s1, $t0
+	mfhi $t1
+	
+	# Get the enemy pos
+	lw $t2, 36($s0)
+	div $t2, $t0
+	mfhi $t2
+	
+	# Get the relative position
+	sub $t1, $t2, $t1
+	bltz $t1, check_enemy_1_right
+	bgtz $t1, check_enemy_1_left
+	j check_enemy_next
+	
+check_enemy_1_right:	# Move enemy right
+
+	# Move enemy right
+	lw $t0, 36($s0)
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_enemy_right
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+	sw $t0, 36($s0)
+	j check_enemy_next
+
+check_enemy_1_left:	# Move enemy left
+
+	# Move enemy left
+	lw $t0, 36($s0)
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_enemy_left
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+	sw $t0, 36($s0)
+	j check_enemy_next
+	
+check_enemy_2:	# Move enemy
+
+	# Get timer
+	li $t0, 120
+	blt $s6, $t0, check_enemy_2_left
+	bge $s6, $t0, check_enemy_2_right
+	j check_enemy_end
+	
+check_enemy_2_right:	# Move enemy right
+
+	# Move enemy right
+	lw $t0, 40($s0)
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_enemy_right
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+	sw $t0, 40($s0)
+	j check_enemy_end
+
+check_enemy_2_left:	# Move enemy left
+
+	# Move enemy left
+	lw $t0, 40($s0)
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_enemy_left
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+	sw $t0, 40($s0)
+	j check_enemy_end
+
+######################################################################
+
+
+
+check_double:	# Check for double jump refresh
+
+	# Get black
+	li $t0, 0x00000000
+	
+	# Check below the player
+	lw $t1, 1020($s1)
+	bne $t0, $t1, check_double_yes
+	lw $t1, 1024($s1)
+	bne $t0, $t1, check_double_yes
+	lw $t1, 1028($s1)
+	bne $t0, $t1, check_double_yes
+	jr $ra
+	
+check_double_yes:	# Is landed
+
+	# Set the double jump token
+	li $t0, 1
+	sw $s0, 28($s0)
+	jr $ra
+
+######################################################################
+
+
+
+check_win:	# Check if the player wins
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Get red
+	li $t0, 0x0000ff00
+	
+	# Check every tile touching the player
+	lw $t1, -1028($s1)
+	beq $t0, $t1, check_win_win
+	lw $t1, -1024($s1)
+	beq $t0, $t1, check_win_win
+	lw $t1, -1020($s1)
+	beq $t0, $t1, check_win_win
+	
+	lw $t1, -520($s1)
+	beq $t0, $t1, check_win_win
+	lw $t1, -8($s1)
+	beq $t0, $t1, check_win_win
+	lw $t1, 504($s1)
+	beq $t0, $t1, check_win_win
+	
+	lw $t1, -504($s1)
+	beq $t0, $t1, check_win_win
+	lw $t1, 8($s1)
+	beq $t0, $t1, check_win_win
+	lw $t1, 520($s1)
+	beq $t0, $t1, check_win_win
+	
+	lw $t1, 1020($s1)
+	beq $t0, $t1, check_win_win
+	lw $t1, 1024($s1)
+	beq $t0, $t1, check_win_win
+	lw $t1, 1028($s1)
+	beq $t0, $t1, check_win_win
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+check_win_win:	# Take damage potentially
+
+	jal win_game
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+
+#####################################################################
+
+check_damage:	# Check if the player takes damage
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Get red
+	li $t0, 0x00ff0000
+	
+	# Check every tile touching the player
+	lw $t1, -1028($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, -1024($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, -1020($s1)
+	beq $t0, $t1, check_damage_damage
+	
+	lw $t1, -520($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, -8($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 504($s1)
+	beq $t0, $t1, check_damage_damage
+	
+	lw $t1, -504($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 8($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 520($s1)
+	beq $t0, $t1, check_damage_damage
+	
+	lw $t1, 1020($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 1024($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 1028($s1)
+	beq $t0, $t1, check_damage_damage
+	
+	# Get red
+	li $t0, 0x00fe0000
+	
+	# Check every tile touching the player
+	lw $t1, -1028($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, -1024($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, -1020($s1)
+	beq $t0, $t1, check_damage_damage
+	
+	lw $t1, -520($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, -8($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 504($s1)
+	beq $t0, $t1, check_damage_damage
+	
+	lw $t1, -504($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 8($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 520($s1)
+	beq $t0, $t1, check_damage_damage
+	
+	lw $t1, 1020($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 1024($s1)
+	beq $t0, $t1, check_damage_damage
+	lw $t1, 1028($s1)
+	beq $t0, $t1, check_damage_damage
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+check_damage_damage:	# Take damage potentially
+
+	jal lose_life
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+
+######################################################################
+
+momentum_counter:	# Manages momentum
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Get momentum
+	lw $t0, 24($s0)
+
+	# Check if center pixel below the player is not black
+	lw $t2, 1024($s1)
+	li $t1, 0x00000000
+	bne $t2, $t1, momentum_counter_reset
+	
+	# Check if left pixel below the player is not black
+	lw $t2, 1020($s1)
+	bne $t2, $t1, momentum_counter_reset
+	
+	# Check if right pixel below the player is not black
+	lw $t2, 1028($s1)
+	bne $t2, $t1, momentum_counter_reset
+	
+	# If right momentum
+	bgt $t0, $zero, momentum_counter_right
+	
+	# If left momentum
+	blt $t0, $zero, momentum_counter_left
+	
+momentum_counter_end:	# End of function
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+momentum_counter_right:	# Right momentum
+
+	# Save $t0
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Move right
+	jal move_right
+	
+	# Load $t0
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+	addi $t0, $t0, -1
+	sw $t0, 24($s0)
+	j momentum_counter_end
+	
+momentum_counter_left:	# Left momentum
+
+	# Save $t0
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+
+	# Move left
+	jal move_left
+	
+	# Load $t0
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+	addi $t0, $t0, 1
+	sw $t0, 24($s0)
+	j momentum_counter_end
+	
+momentum_counter_reset:	# Reset momentum
+
+	add $t0, $zero, $zero
+	sw $t0, 24($s0)
+	j momentum_counter_end
+
+
+
+######################################################################
+
+set_plats:	# Sets up all the initial platforms
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Setting win platform
+	li $t0, 9
+	sw $t0, 0($sp)
+	li $t0, 128
+	sw $t0, -4($sp)
+	li $t0, 0
+	sw $t0, -8($sp)
+	sw $zero, -12($sp)
+	li $t0, 0x0000ff00
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting first row/plat/space/offset/color
+	li $t0, 111
+	sw $t0, 0($sp)
+	li $t0, 112
+	sw $t0, -4($sp)
+	li $t0, 16
+	sw $t0, -8($sp)
+	sw $zero, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting second row/plat/space/offset/color
+	li $t0, 95
+	sw $t0, 0($sp)
+	li $t0, 96
+	sw $t0, -4($sp)
+	li $t0, 32
+	sw $t0, -8($sp)
+	li $t0, 0
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting third row/plat/space/offset/color
+	li $t0, 79
+	sw $t0, 0($sp)
+	li $t0, 64
+	sw $t0, -4($sp)
+	li $t0, 64
+	sw $t0, -8($sp)
+	li $t0, 0
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting third row/plat/space/offset/color
+	li $t0, 79
+	sw $t0, 0($sp)
+	li $t0, 32
+	sw $t0, -4($sp)
+	li $t0, 16
+	sw $t0, -8($sp)
+	li $t0, 80
+	sw $t0, -12($sp)
+	li $t0, 0x00ff0000
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting fourth row/plat/space/offset/color
+	li $t0, 63
+	sw $t0, 0($sp)
+	li $t0, 32
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 0
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting fourth row/plat/space/offset/color
+	li $t0, 63
+	sw $t0, 0($sp)
+	li $t0, 26
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 44
+	sw $t0, -12($sp)
+	li $t0, 0x00ff0000
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting fourth row/plat/space/offset/color
+	li $t0, 63
+	sw $t0, 0($sp)
+	li $t0, 26
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 90
+	sw $t0, -12($sp)
+	li $t0, 0x00ff0000
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting fourth row/plat/space/offset/color
+	li $t0, 63
+	sw $t0, 0($sp)
+	li $t0, 4
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 78
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting fifth row/plat/space/offset/color
+	li $t0, 47
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 48
+	sw $t0, -8($sp)
+	li $t0, 0
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting fifth row/plat/space/offset/color
+	li $t0, 31
+	sw $t0, 0($sp)
+	li $t0, 100
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 0
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Setting fifth row/plat/space/offset/color
+	li $t0, 31
+	sw $t0, 0($sp)
+	li $t0, 50
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 0
+	sw $t0, -12($sp)
+	li $t0, 0x00ff0000
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+
+
+
+######################################################################
+
+move_plat:	# Manage the moving platforms
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+
+	# Move platforms every 4th frame
+	li $t0, 4
+	div $s6, $t0
+	mfhi $t0
+	bne $t0, $zero, move_plat_2
+	
+	# Loading row to move
+	li $t0, 111
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_left_plat
+	
+move_plat_2:	# Next plat
+
+	# Move platforms every 6th frame
+	li $t0, 6
+	div $s6, $t0
+	mfhi $t0
+	bne $t0, $zero, move_plat_3
+	
+	# Loading row to move
+	li $t0, 95
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_right_plat
+	
+move_plat_3:	# Next plat
+	
+	# Every 5th frame
+	li $t0, 5
+	div $s6, $t0
+	mfhi $t0
+	bne $t0, $zero, move_plat_4
+	
+	# Loading row to move
+	li $t0, 79
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_left_plat
+	
+move_plat_4:	# Next plat
+
+	# Every 3th frame
+	li $t0, 3
+	div $s6, $t0
+	mfhi $t0
+	bne $t0, $zero, move_plat_5
+	
+	# Loading row to move
+	li $t0, 63
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_right_plat
+	
+move_plat_5:	# Next plat
+
+	# Every 7th frame
+	li $t0, 7
+	div $s6, $t0
+	mfhi $t0
+	bne $t0, $zero, move_plat_6
+	
+	# Loading row to move
+	li $t0, 47
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_left_plat
+	
+move_plat_6:	# Next plat
+
+	# Every 2th frame
+	li $t0, 2
+	div $s6, $t0
+	mfhi $t0
+	bne $t0, $zero, move_plat_7
+	
+	# Loading row to move
+	li $t0, 31
+	sw $t0, 0($sp)
+	addi $sp, $sp, -4
+	jal move_right_plat
+	
+move_plat_7:	# Next plat
+
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+
+
+
+######################################################################
+
+invuln_counter:	# Manage the invuln counter
+
+	# Decrement counter if not 0
+	lw $t0, 20($s0)
+	beq $t0, $zero, invuln_counter_end
+	
+	# Decrement and save
+	addi $t0, $t0, -1
+	sw $t0, 20($s0)
+	
+invuln_counter_end:	# End of functions
+
+	# Return
+	jr $ra
+
+######################################################################
+
+run_counter:	# Manage the run cycle counter
+
+	# Increment counter or reset if at max
+	addi $s6, $s6, 1
+	li $t0, 240
+	bne $s6, $t0, run_counter_end
+
+	# Set to 0
+	li $s6, 0
+	
+run_counter_end:	# End os counter function
+
+	# Return
+	jr $ra
+
+######################################################################
+	
+	
+
+lose_life:	# Lose a life
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+
+	# Do nothing if invuln
+	lw $t0, 20($s0)
+	bne $t0, $zero, lose_life_end
+
+	# Load the number of lives
+	lw $t0, 16($s0)
+	
+	# Lose one
+	addi $t0, $t0, -1
+	sw $t0, 16($s0)
+	
+	# If no lives left game over
+	beq $t0, $zero, lose_life_game_over
+	
+	# Set the invuln timer
+	li $t0, 100
+	sw $t0, 20($s0)
+	
+	# Draw the new life count
+	jal draw_lives
+	
+lose_life_end:	# End of function
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+lose_life_game_over:	# Game over
+
+	jal game_over
+	j lose_life_end
+	
+######################################################################
+#### MOVEMENT FUNCTIONS ##############################################
+######################################################################
+
+
+
+check_jump:	# Check for occuring jump
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Currently jumping right
+	lw $t0, 4($s0)
+	beq $t0, $zero, check_jump_up
+	jal jump_right
+	j check_jump_end
+	
+check_jump_up:	# Check up jump
+	
+	# Currently jumping up
+	lw $t0, 8($s0)
+	beq $t0, $zero, check_jump_left
+	jal jump
+	j check_jump_end
+	
+check_jump_left:	# Check left jump
+	
+	# Currently jumping left
+	lw $t0, 12($s0)
+	beq $t0, $zero, check_jump_gravity
+	jal jump_left
+	j check_jump_end
+	
+check_jump_gravity:	# Apply gravity
+
+	# Apply gravity
+	jal move_down
+	
+check_jump_end:	# End of jump check
+
+	# Get return value
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+
+########################################################
+
+
+check_move:	# Check for movement commands
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Move right
+	beq $s2, 0x64, check_move_right
+	
+	# Move left
+	beq $s2, 0x61, check_move_left
+	
+	# Jump
+	beq $s2, 0x77, check_move_jump
+	
+	# Jump right
+	beq $s2, 0x65, check_move_jump_right
+	
+	# Jump left
+	beq $s2, 0x71, check_move_jump_left
+	
+	# No more keys to check
+	j check_move_return
+	
+check_move_right:	# Move right
+
+	# Call
+	jal move_right
+	lw $t0 24($s0)
+	addi $t0, $t0, 7
+	sw $t0, 24($s0)
+	j check_move_return
+	
+check_move_left:	# Move left
+
+	# Call
+	jal move_left
+	lw $t0 24($s0)
+	addi $t0, $t0, -7
+	sw $t0, 24($s0)
+	j check_move_return
+	
+check_move_jump:	# Jump
+
+	# Double jump reset
+	lw $t0, 28($s0)
+	beq $t0, $zero, check_move_jump_2
+	sw $zero, 4($s0)
+	sw $zero, 8($s0)
+	sw $zero, 12($s0)
+	
+check_move_jump_2:	# Jump to
+
+	# Call
+	jal jump
+	j check_move_return
+		
+check_move_jump_right:	# Jump right
+
+	# Double jump reset
+	lw $t0, 28($s0)
+	beq $t0, $zero, check_move_jump_right_2
+	sw $zero, 4($s0)
+	sw $zero, 8($s0)
+	sw $zero, 12($s0)
+
+check_move_jump_right_2:	# Jump to
+
+	# Call
+	jal jump_right
+	j check_move_return
+	
+check_move_jump_left:	# Jump left
+
+	# Double jump reset
+	lw $t0, 28($s0)
+	beq $t0, $zero, check_move_jump_left_2
+	sw $zero, 4($s0)
+	sw $zero, 8($s0)
+	sw $zero, 12($s0)
+	
+check_move_jump_left_2:	# Jump to
+
+	# Call
+	jal jump_left	
+	
+check_move_return:	# Return function
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+###############################################
+
+
+jump_right:	# The player pixel jumps right
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+
+	# Different jump stages
+	lw $t2, 4($s0)
+	beq $t2, $zero, jump_right_new
+	
+	addi $t0, $zero, 3
+	ble $t2, $t0, jump_right_third
+	
+	addi $t0, $zero, 6
+	ble $t2, $t0, jump_right_second
+	
+	# Jump 7-8
+	jal move_up
+	jal move_right
+	jal move_up
+	jal move_right
+	lw $t2, 4($s0)
+	addi $t2, $t2, -1
+	sw $t2, 4($s0)
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+jump_right_new:	# Start new jump
+
+	# Check if the middle pixel below the player is not black
+	lw $t0, 1024($s1)
+	li $t1, 0x00000000
+	bne $t0, $t1, jump_right_jump
+	
+	# Check if the left pixel below the player is not black
+	lw $t0, 1020($s1)
+	bne $t0, $t1, jump_right_jump
+	
+	# Check if the right pixel below the player is not black
+	lw $t0, 1028($s1)
+	bne $t0, $t1, jump_right_jump
+	
+	# Check if there is a double jump token
+	lw $t0, 28($s0)
+	bne $t0, $zero, jump_right_double
+	j jump_right_not
+	
+jump_right_double:	# Double jump
+
+	# Use the token
+	addi $t0, $zero, 0
+	sw $t0, 28($s0)
+
+jump_right_jump:	# Jump
+
+	# Jump 0
+	jal move_up
+	jal move_up
+	jal move_right
+	jal move_up
+	jal move_right
+	lw $t2, 4($s0)
+	addi $t2, $t2, 8
+	sw $t2, 4($s0)
+	
+jump_right_not:	# Not jump
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+jump_right_second:	# Second stage of jump
+
+	# Jump 4-6
+	jal move_right
+	jal move_up
+	jal move_right
+	lw $t2, 4($s0)
+	addi $t2, $t2, -1
+	sw $t2, 4($s0)
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+jump_right_third:	# Third stage of jump
+
+	# Jump 0-3
+	jal move_right
+	li $t0, 8
+	sw $t0, 24($s0)
+	lw $t2, 4($s0)
+	addi $t2, $t2, -1
+	sw $t2, 4($s0)
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+
+############################################################
+
+
+jump:	# The player pixel jumps
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+
+	# Different jump stages
+	lw $t2, 8($s0)
+	beq $t2, $zero, jump_new
+	
+	addi $t0, $zero, 7
+	ble $t2, $t0, jump_third
+	
+	addi $t0, $zero, 9
+	ble $t2, $t0, jump_second
+	
+	# Jump 7-12
+	jal move_up
+	jal move_up
+	lw $t2, 8($s0)
+	addi $t2, $t2, -1
+	sw $t2, 8($s0)
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+jump_new:	# Start new jump
+
+	# Check if the middle pixel below the player is not black
+	lw $t0, 1024($s1)
+	li $t1, 0x00000000
+	bne $t0, $t1, jump_jump
+	
+	# Check if the left pixel below the player is not black
+	lw $t0, 1020($s1)
+	bne $t0, $t1, jump_jump
+	
+	# Check if the right pixel below the player is not black
+	lw $t0, 1028($s1)
+	bne $t0, $t1, jump_jump
+	
+	# Check if there is a double jump token
+	lw $t0, 28($s0)
+	bne $t0, $zero, jump_double
+	j jump_not
+	
+jump_double:	# Double jump
+
+	# Use the token
+	addi $t0, $zero, 0
+	sw $t0, 28($s0)
+
+jump_jump:	# Jump
+
+	# Jump 0
+	jal move_up
+	jal move_up
+	jal move_up
+	lw $t2, 8($s0)
+	addi $t2, $t2, 12
+	sw $t2, 8($s0)
+	
+jump_not:	# Not jump
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+jump_second:	# Second stage of jump
+
+	# Jump 7-9
+	jal move_up
+	lw $t2, 8($s0)
+	addi $t2, $t2, -1
+	sw $t2, 8($s0)
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+jump_third:	# Third stage of jump
+
+	# Jump 0-7
+	lw $t2, 8($s0)
+	addi $t2, $t2, -1
+	sw $t2, 8($s0)
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+########################################################
+
+
+jump_left:	# The player pixel jumps left
+
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+
+	# Different jump stages
+	lw $t2, 12($s0)
+	beq $t2, $zero, jump_left_new
+	
+	addi $t0, $zero, 3
+	ble $t2, $t0, jump_left_third
+	
+	addi $t0, $zero, 6
+	ble $t2, $t0, jump_left_second
+	
+	# Jump 7-8
+	jal move_up
+	jal move_left
+	jal move_up
+	jal move_left
+	lw $t2, 12($s0)
+	addi $t2, $t2, -1
+	sw $t2, 12($s0)
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+jump_left_new:	# Start new jump
+
+	# Check if the middle pixel below the player is not black
+	lw $t0, 1024($s1)
+	li $t1, 0x00000000
+	bne $t0, $t1, jump_left_jump
+	
+	# Check if the left pixel below the player is not black
+	lw $t0, 1020($s1)
+	bne $t0, $t1, jump_left_jump
+	
+	# Check if the right pixel below the player is not black
+	lw $t0, 1028($s1)
+	bne $t0, $t1, jump_left_jump
+	
+	# Check if there is a double jump token
+	lw $t0, 28($s0)
+	bne $t0, $zero, jump_left_double
+	j jump_left_not
+	
+jump_left_double:	# Double jump
+
+	# Use the token
+	addi $t0, $zero, 0
+	sw $t0, 28($s0)
+
+jump_left_jump:	# Jump
+
+	# Jump 0
+	jal move_up
+	jal move_up
+	jal move_left
+	jal move_up
+	jal move_left
+	lw $t2, 12($s0)
+	addi $t2, $t2, 8
+	sw $t2, 12($s0)
+	
+jump_left_not:	# Not jump
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+jump_left_second:	# Second stage of jump
+
+	# Jump 4-6
+	jal move_left
+	jal move_up
+	jal move_left
+	lw $t2, 12($s0)
+	addi $t2, $t2, -1
+	sw $t2, 12($s0)
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+jump_left_third:	# Third stage of jump
+
+	# Jump 0-3
+	jal move_left
+	li $t0, -8
+	sw $t0, 24($s0)
+	lw $t2, 12($s0)
+	addi $t2, $t2, -1
+	sw $t2, 12($s0)
+	
+	# Restore return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+	
+	
+########################################################
+
+
+move_enemy_right:	# Move the player pixel one pixel right
+
+	# Get the enemy pos tracker
+	addi $sp, $sp, 4
+	lw $t3, 0($sp)
+
+	# Check if center pixel right of the player is not black
+	lw $t0, 8($t3)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_enemy_right_stop
+	
+	# Check if top pixel right of the player is not black
+	lw $t0, -504($t3)
+	bne $t0, $t1, move_enemy_right_stop
+
+	# Sub the screen address from player address
+	lw $t1, 0($s0)
+	sub $t0, $t3, $t1
+	
+	# Get the modulo of the player position and 512
+	li $t1, 512
+	div $t0, $t1
+	mfhi $t0
+	
+	# Check if player is at far right
+	li $t1, 504
+	bge $t0, $t1 move_enemy_right_stop
+	
+	# Check if bottom pixel right of the player is not black
+	lw $t0, 520($t3)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_enemy_right_stop
+	
+	# Set old pixels to black
+	li $t2, 0x00000000
+	sw $t2, -516($t3)
+	sw $t2, -512($t3)
+	sw $t2, -508($t3)
+	sw $t2, -4($t3)
+	sw $t2, 0($t3)
+	sw $t2, 4($t3)
+	sw $t2, 508($t3)
+	sw $t2, 512($t3)
+	sw $t2, 516($t3)
+
+	# Add to the player position
+	addi $t3, $t3, 4
+	j move_enemy_right_end
+	
+move_enemy_right_end:	# End of move right function
+
+	# Set new pixels to white
+	li $t2, 0x00ff0000
+	sw $t2, 0($t3)
+	sw $t2, 512($t3)
+	li $t2, 0x00888888
+	sw $t2, -508($t3)
+	sw $t2, -516($t3)
+	li $t2, 0x00ffffff
+	sw $t2, -512($t3)
+	sw $t2, -4($t3)
+	sw $t2, 4($t3)
+	sw $t2, 508($t3)
+	sw $t2, 516($t3)
+	
+move_enemy_right_stop:	# End the function and do not move
+
+	# Return
+	sw $t3, 0($sp)
+	addi $sp, $sp, -4
+	jr $ra
+########################################################
+
+
+move_enemy_left:	# Move the player pixel one pixel left
+
+	# Get the enemy pos tracker
+	addi $sp, $sp, 4
+	lw $t3, 0($sp)
+
+	# Check if center pixel left of the player is not black
+	lw $t0, -8($t3)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_enemy_left_stop
+	
+	# Check if bottom pixel left of the player if not black
+	lw $t0, 504($t3)
+	bne $t0, $t1, move_enemy_left_stop
+
+	# Sub the screen address from player address
+	lw $t1, 0($s0)
+	sub $t0, $t3, $t1
+	
+	# Get the modulo of the player position and 512
+	li $t1, 512
+	div $t0, $t1
+	mfhi $t0
+	
+	# Check if player is at far left
+	li $t1, 4
+	ble $t0, $t1 move_enemy_left_stop
+	
+	# Check if top pixel left of the player is not black
+	lw $t0, -520($t3)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_enemy_left_stop
+	
+	# Set old pixels to black
+	li $t2, 0x00000000
+	sw $t2, -516($t3)
+	sw $t2, -512($t3)
+	sw $t2, -508($t3)
+	sw $t2, -4($t3)
+	sw $t2, 0($t3)
+	sw $t2, 4($t3)
+	sw $t2, 508($t3)
+	sw $t2, 512($t3)
+	sw $t2, 516($t3)
+
+	# Sub to the player position
+	addi $t3, $t3, -4
+	j move_enemy_left_end
+	
+move_enemy_left_end:	# End of move left function
+	
+	# Set new pixels to white
+	li $t2, 0x00ff0000
+	sw $t2, 0($t3)
+	sw $t2, 512($t3)
+	li $t2, 0x00888888
+	sw $t2, -508($t3)
+	sw $t2, -516($t3)
+	li $t2, 0x00ffffff
+	sw $t2, -512($t3)
+	sw $t2, -4($t3)
+	sw $t2, 4($t3)
+	sw $t2, 508($t3)
+	sw $t2, 516($t3)
+	
+move_enemy_left_stop:	# End the function and no move
+
+	# Return
+	sw $t3, 0($sp)
+	addi $sp, $sp, -4
+	jr $ra
+	
+########################################################
+
+
+
+move_right:	# Move the player pixel one pixel right
+
+	# Check if center pixel right of the player is not black
+	lw $t0, 8($s1)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_right_stop
+	
+	# Check if top pixel right of the player is not black
+	lw $t0, -504($s1)
+	bne $t0, $t1, move_right_stop
+
+	# Sub the screen address from player address
+	lw $t1, 0($s0)
+	sub $t0, $s1, $t1
+	
+	# Get the modulo of the player position and 512
+	li $t1, 512
+	div $t0, $t1
+	mfhi $t0
+	
+	# Check if player is at far right
+	li $t1, 504
+	bge $t0, $t1 move_right_stop
+	
+	# Check if bottom pixel right of the player is not black
+	lw $t0, 520($s1)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_right_stop
+	
+	# Set old pixels to black
+	li $t2, 0x00000000
+	sw $t2, -516($s1)
+	sw $t2, -512($s1)
+	sw $t2, -508($s1)
+	sw $t2, -4($s1)
+	sw $t2, 0($s1)
+	sw $t2, 4($s1)
+	sw $t2, 508($s1)
+	sw $t2, 512($s1)
+	sw $t2, 516($s1)
+
+	# Add to the player position
+	addi $s1, $s1, 4
+	j move_right_end
+	
+move_right_end:	# End of move right function
+
+	# Set new pixels to white
+	li $t2, 0x00ffffff
+	sw $t2, -516($s1)
+	sw $t2, -508($s1)
+	sw $t2, 0($s1)
+	sw $t2, 508($s1)
+	sw $t2, 516($s1)
+	li $t2, 0x00888888
+	sw $t2, -4($s1)
+	sw $t2, -512($s1)
+	sw $t2, 4($s1)
+	sw $t2, 512($s1)
+	
+move_right_stop:	# End the function and do not move
+
+	# Return
+	jr $ra
+########################################################
+
+
+move_left:	# Move the player pixel one pixel left
+
+	# Check if center pixel left of the player is not black
+	lw $t0, -8($s1)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_left_stop
+	
+	# Check if bottom pixel left of the player if not black
+	lw $t0, 504($s1)
+	bne $t0, $t1, move_left_stop
+
+	# Sub the screen address from player address
+	lw $t1, 0($s0)
+	sub $t0, $s1, $t1
+	
+	# Get the modulo of the player position and 512
+	li $t1, 512
+	div $t0, $t1
+	mfhi $t0
+	
+	# Check if player is at far left
+	li $t1, 4
+	ble $t0, $t1 move_left_stop
+	
+	# Check if top pixel left of the player is not black
+	lw $t0, -520($s1)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_left_stop
+	
+	# Set old pixels to black
+	li $t2, 0x00000000
+	sw $t2, -516($s1)
+	sw $t2, -512($s1)
+	sw $t2, -508($s1)
+	sw $t2, -4($s1)
+	sw $t2, 0($s1)
+	sw $t2, 4($s1)
+	sw $t2, 508($s1)
+	sw $t2, 512($s1)
+	sw $t2, 516($s1)
+
+	# Sub to the player position
+	addi $s1, $s1, -4
+	j move_left_end
+	
+move_left_end:	# End of move left function
+	
+	# Set new pixels to white
+	li $t2, 0x00ffffff
+	sw $t2, -516($s1)
+	sw $t2, -508($s1)
+	sw $t2, 0($s1)
+	sw $t2, 508($s1)
+	sw $t2, 516($s1)
+	li $t2, 0x00888888
+	sw $t2, -4($s1)
+	sw $t2, -512($s1)
+	sw $t2, 4($s1)
+	sw $t2, 512($s1)
+	
+move_left_stop:	# End the function and no move
+
+	# Return
+	jr $ra
+########################################################
+
+
+move_down:	# Move the player pixel one pixel down
+
+	# Get the screen address
+	lw $t1, 0($s0)
+
+	# Sub the screen address from player address
+	sub $t0, $s1, $t1
+	
+	# Get the div of the player position and 512
+	li $t1, 512
+	div $t0, $t1
+	mflo $t0
+	
+	# Check if player is at far bottom
+	li $t1, 126
+	bge $t0, $t1 move_down_end
+	
+	# Check if center pixel below the player is not black
+	lw $t0, 1024($s1)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_down_end
+	
+	# Check if left pixel below the player is not black
+	lw $t0, 1020($s1)
+	bne $t0, $t1, move_down_end
+	
+	# Check if right pixel below the player is not black
+	lw $t0, 1028($s1)
+	bne $t0, $t1, move_down_end
+	
+	# Set old pixels to black
+	li $t2, 0x00000000
+	sw $t2, -516($s1)
+	sw $t2, -512($s1)
+	sw $t2, -508($s1)
+	sw $t2, -4($s1)
+	sw $t2, 0($s1)
+	sw $t2, 4($s1)
+	sw $t2, 508($s1)
+	sw $t2, 512($s1)
+	sw $t2, 516($s1)
+
+	# Add to the player position
+	addi $s1, $s1, 512
+	
+	# Set new pixel to white
+	li $t2, 0x00ffffff
+	sw $t2, -516($s1)
+	sw $t2, -508($s1)
+	sw $t2, 0($s1)
+	sw $t2, 508($s1)
+	sw $t2, 516($s1)
+	li $t2, 0x00888888
+	sw $t2, -4($s1)
+	sw $t2, -512($s1)
+	sw $t2, 4($s1)
+	sw $t2, 512($s1)
+	j move_down_end
+	
+move_down_end:	# End of move down function
+
+	# Return
+	jr $ra
+#######################################################
+
+
+move_up:	# Move the player pixel one pixel up
+
+	# Sub the screen address from player address
+	lw $t1, 0($s0)
+	sub $t0, $s1, $t1
+	
+	# Get the div of the player position and 512
+	li $t1, 512
+	div $t0, $t1
+	mflo $t0
+	
+	# Check if player is at far top
+	li $t1, 1
+	ble $t0, $t1 move_up_end
+	
+	# Check if center pixel above the player is not black
+	lw $t0, -1024($s1)
+	li $t1, 0x00000000
+	bne $t0, $t1, move_up_end
+	
+	# Check if left pixel above the player is not black
+	lw $t0, -1028($s1)
+	bne $t0, $t1, move_up_end
+	
+	# Check if right pixel above the player is not black
+	lw $t0, -1020($s1)
+	bne $t0, $t1, move_up_end
+	
+	# Set old pixel to black
+	li $t2, 0x00000000
+	sw $t2, -516($s1)
+	sw $t2, -512($s1)
+	sw $t2, -508($s1)
+	sw $t2, -4($s1)
+	sw $t2, 0($s1)
+	sw $t2, 4($s1)
+	sw $t2, 508($s1)
+	sw $t2, 512($s1)
+	sw $t2, 516($s1)
+
+	# Add to the player position
+	addi $s1, $s1, -512
+	
+	# Set new pixel to white
+	li $t2, 0x00ffffff
+	sw $t2, -516($s1)
+	sw $t2, -508($s1)
+	sw $t2, 0($s1)
+	sw $t2, 508($s1)
+	sw $t2, 516($s1)
+	li $t2, 0x00888888
+	sw $t2, -4($s1)
+	sw $t2, -512($s1)
+	sw $t2, 4($s1)
+	sw $t2, 512($s1)
+	j move_up_end
+	
+move_up_end:	# End of move up function
+
+	# Return
+	jr $ra
+##################################################################
+
+##################################################################
+#### DRAWING FUNCTIONS ###########################################
+##################################################################
+
+
+
+draw_lives:	# Draw the number of lives
+
+	# Load the base address
+	lw $t4, 0($s0)
+
+	# Load black
+	li $t3, 0x00000000
+	
+	# Clear canvas
+	sw $t3, 1128($t4)
+	sw $t3, 1132($t4)
+	sw $t3, 1136($t4)
+	sw $t3, 1640($t4)
+	sw $t3, 1644($t4)
+	sw $t3, 1648($t4)
+	sw $t3, 2152($t4)
+	sw $t3, 2156($t4)
+	sw $t3, 2160($t4)
+	sw $t3, 2664($t4)
+	sw $t3, 2668($t4)
+	sw $t3, 2672($t4)
+	sw $t3, 3176($t4)
+	sw $t3, 3180($t4)
+	sw $t3, 3184($t4)
+
+	# Get the lives count
+	lw $t0, 16($s0)
+	
+	# Load the possible numbers
+	li $t1, 1
+	li $t2, 2
+	
+	# Load white
+	li $t3, 0x00ffffff
+	
+	# Check how many lives
+	beq $t0, $t1, draw_lives_1
+	beq $t0, $t2, draw_lives_2
+	
+	# Draw 3 lives
+	sw $t3, 1128($t4)
+	sw $t3, 1132($t4)
+	sw $t3, 1648($t4)
+	sw $t3, 2156($t4)
+	sw $t3, 2672($t4)
+	sw $t3, 3176($t4)
+	sw $t3, 3180($t4)
+	jr $ra
+	
+draw_lives_2:	# 2 lives case
+
+	# Draw 2 lives
+	sw $t3, 1128($t4)
+	sw $t3, 1132($t4)
+	sw $t3, 1648($t4)
+	sw $t3, 2156($t4)
+	sw $t3, 2664($t4)
+	sw $t3, 3176($t4)
+	sw $t3, 3180($t4)
+	sw $t3, 3184($t4)
+	jr $ra
+	
+draw_lives_1:	# 1 life case
+	
+	# Draw 1 life
+	sw $t3, 1128($t4)
+	sw $t3, 1132($t4)
+	sw $t3, 1644($t4)
+	sw $t3, 2156($t4)
+	sw $t3, 2668($t4)
+	sw $t3, 3176($t4)
+	sw $t3, 3180($t4)
+	sw $t3, 3184($t4)
+	jr $ra
+
+
+##################################################################
+
+draw_menu:	# Draw the menu for the first time
+
+	# Get the base address
+	lw $t0, 0($s0)
+	
+	# Get the start position
+	addi $t1, $t0, 0
+	
+	# Get the end position
+	addi $t2, $t1, 512
+	
+	# Get the color white
+	li $t3, 0x00ffffff
+	
+draw_menu_top:	# Loop to draw the platform
+
+	# While the last pixel is not reached
+	beq $t1, $t2, draw_menu_top_end
+	sw $t3, 0($t1)
+	addi $t1, $t1, 4
+	j draw_menu_top
+	
+draw_menu_top_end:	# End the loop
+
+	# Get the start position
+	addi $t1, $t0, 4096
+	
+	# Get the end position
+	addi $t2, $t1, 512
+	
+draw_menu_bot:	# Loop to draw the platform
+
+	# While the last pixel is not reached
+	beq $t1, $t2, draw_menu_bot_end
+	sw $t3, 0($t1)
+	addi $t1, $t1, 4
+	j draw_menu_bot
+	
+draw_menu_bot_end:	# End the loop
+
+	# Draw the left side
+	sw $t3, 512($t0)
+	sw $t3, 1024($t0)
+	sw $t3, 1536($t0)
+	sw $t3, 2048($t0)
+	sw $t3, 2560($t0)
+	sw $t3, 3072($t0)
+	sw $t3, 3584($t0)
+	
+	# Draw the right side
+	sw $t3, 1020($t0)
+	sw $t3, 1532($t0)
+	sw $t3, 2044($t0)
+	sw $t3, 2556($t0)
+	sw $t3, 3068($t0)
+	sw $t3, 3580($t0)
+	sw $t3, 4092($t0)
+	
+	# Draw lives text L
+	sw $t3, 1032($t0)
+	sw $t3, 1544($t0)
+	sw $t3, 2056($t0)
+	sw $t3, 2568($t0)
+	sw $t3, 3080($t0)
+	sw $t3, 3084($t0)
+	sw $t3, 3088($t0)
+	
+	# Draw lives text I
+	sw $t3, 1048($t0)
+	sw $t3, 1052($t0)
+	sw $t3, 1056($t0)
+	sw $t3, 1564($t0)
+	sw $t3, 2076($t0)
+	sw $t3, 2588($t0)
+	sw $t3, 3096($t0)
+	sw $t3, 3100($t0)
+	sw $t3, 3104($t0)
+	
+	# Draw lives text V
+	sw $t3, 1064($t0)
+	sw $t3, 1576($t0)
+	sw $t3, 2088($t0)
+	sw $t3, 1072($t0)
+	sw $t3, 1584($t0)
+	sw $t3, 2096($t0)
+	sw $t3, 2604($t0)
+	sw $t3, 3116($t0)
+	
+	# Draw lives text E
+	sw $t3, 1080($t0)
+	sw $t3, 1084($t0)
+	sw $t3, 1088($t0)
+	sw $t3, 1592($t0)
+	sw $t3, 2104($t0)
+	sw $t3, 2108($t0)
+	sw $t3, 2112($t0)
+	sw $t3, 2616($t0)
+	sw $t3, 3128($t0)
+	sw $t3, 3132($t0)
+	sw $t3, 3136($t0)
+	
+	# Draw lives text S
+	sw $t3, 1100($t0)
+	sw $t3, 1104($t0)
+	sw $t3, 1608($t0)
+	sw $t3, 2124($t0)
+	sw $t3, 2640($t0)
+	sw $t3, 3144($t0)
+	sw $t3, 3148($t0)
+	
+	# Draw starting lives
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	jal draw_lives
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+
+	jr $ra
+
+
+
+##################################################################
+
+move_right_plat:	# Move the bottom layer of platforms
+
+	# Load the parameter
+	addi $sp, $sp, 4
+	lw $t1, 0($sp)
+	
+	# Save ra
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Set 512
+	li $t7, 512
+
+	# Get the base address
+	lw $t0, 0($s0)
+	
+	# Get the start position to check
+	mult $t1, $t7
+	mflo $t1
+	addi $t1, $t1, 508
+	add $t1, $t0, $t1
+	
+	# Get the end position to check
+	addi $t2, $t1, -512
+	
+	# Get the color white
+	li $t3, 0x00ffffff
+	
+	# Get the color black
+	li $t4, 0x00000000
+	
+	# Get the color red
+	li $t5, 0x00ff0000
+	
+move_right_plat_loop:	# Loop to move
+
+	# While the last pixel is not checked
+	beq $t1, $t2, move_right_plat_end
+	
+	# Load the current pixel
+	lw $t6, 0($t1)
+	
+	# If not black skip
+	li $t9, 0x00fe0000
+	beq $t6, $t9, move_right_plat_next_2
+	bne $t6, $t4, move_right_plat_loop_skip
+	
+	# If it's one of the player pixels just don't bother
+	addi $t8, $t1, 520
+	beq $t8, $s1, move_right_plat_next_2
+	
+	addi $t8, $t1, 516
+	beq $t8, $s1, move_right_plat_next_2
+	
+	addi $t8, $t1, 512
+	beq $t8, $s1, move_right_plat_next_2
+	
+	addi $t8, $t1, 8
+	beq $t8, $s1, move_right_plat_next_2
+	
+	addi $t8, $t1, 4
+	beq $t8, $s1, move_right_plat_next_2
+	
+	addi $t8, $t1, 0
+	beq $t8, $s1, move_right_plat_next_2
+	
+	addi $t8, $t1, -504
+	beq $t8, $s1, move_right_plat_next_2
+	
+	addi $t8, $t1, -508
+	beq $t8, $s1, move_right_plat_next_2
+	
+	addi $t8, $t1, -512
+	beq $t8, $s1, move_right_plat_next_2
+	
+move_right_plat_loop_skip:
+	
+	# If the pixel is on the far right
+	sub $t8, $t1, $t0
+	div $t8, $t7
+	mfhi $t8
+	addi $t8, $t8, -508
+	bne $t8, $zero, move_right_plat_next
+	
+	# If the player is in the way
+	addi $t8, $t1, 8
+	beq $t8, $s1, move_right_plat_right_move_player
+	
+	addi $t8, $t1, -504
+	beq $t8, $s1, move_right_plat_right_move_player
+	
+	addi $t8, $t1, -1016
+	beq $t8, $s1, move_right_plat_right_move_player
+	
+	# Check if its gonna copy one of the player pixels
+	addi $t8, $t1, 508
+	beq $t8, $s1, move_right_plat_right_player_no_move
+	
+	addi $t8, $t1, -4
+	beq $t8, $s1, move_right_plat_right_player_no_move
+	
+	addi $t8, $t1, -516
+	beq $t8, $s1, move_right_plat_right_player_no_move
+	
+move_right_plat_right_no_move:	# No move player far right
+
+	# Copy the pixel over
+	sw $t6, -508($t1)
+	
+	# Jump
+	j move_right_plat_next_2
+	
+move_right_plat_right_player_no_move:	# No move but replace with black
+
+	# Copy black over
+	sw $t4, -508($t1)
+	
+	# Jump
+	j move_right_plat_next_2
+	
+move_right_plat_next:	# Not far right path	
+	
+	# If the player is in the way
+	addi $t8, $t1, -504
+	beq $t8, $s1, move_right_plat_move_player
+	
+	addi $t8, $t1, 8
+	beq $t8, $s1, move_right_plat_move_player
+	
+	addi $t8, $t1, 520
+	beq $t8, $s1, move_right_plat_move_player
+	
+	# Check if its gonna copy one of the player pixels
+	addi $t8, $t1, 508
+	beq $t8, $s1, move_right_plat_player_no_move
+	
+	addi $t8, $t1, -4
+	beq $t8, $s1, move_right_plat_player_no_move
+	
+	addi $t8, $t1, -516
+	beq $t8, $s1, move_right_plat_player_no_move
+	
+move_right_plat_no_move:
+
+	# Copy the pixel over
+	sw $t6, 4($t1)
+	
+	# Jump
+	j move_right_plat_next_2
+	
+move_right_plat_player_no_move:	# No move but replace with black
+
+	# Copy black over
+	sw $t4, 4($t1)
+	
+	# Jump
+	j move_right_plat_next_2
+	
+move_right_plat_right_move_player:	# Player in the way but far right
+
+	# If the pixel is red
+	beq $t6, $t5, game_over
+
+	# Save registers
+	sw $t0, 0($sp)
+	sw $t1, -4($sp)
+	sw $t2, -8($sp)
+	addi $sp, $sp, 12
+
+	# Move
+	jal move_right
+	
+	# Restore registers
+	addi $sp, $sp, -12
+	lw $t0, 0($sp)
+	lw $t1, -4($sp)
+	lw $t2, -8($sp)
+	
+	j move_right_plat_right_no_move
+	
+move_right_plat_move_player:	# Move the player in the way
+
+	# If the pixel is red
+	beq $t6, $t5, game_over
+	
+	# Check specific position
+	sub $t8, $t1, $t0
+	div $t8, $t7
+	mfhi $t8
+	li $t9, 496
+	ble $t8, $t9, move_right_plat_end
+
+	# Save registers
+	sw $t0, 0($sp)
+	sw $t1, -4($sp)
+	sw $t2, -8($sp)
+	addi $sp, $sp, 12
+
+	# Move
+	jal move_right
+	
+	# Restore registers
+	addi $sp, $sp, -12
+	lw $t0, 0($sp)
+	lw $t1, -4($sp)
+	lw $t2, -8($sp)
+	
+	j move_right_plat_no_move
+		
+move_right_plat_next_2: # Comparing the pixels
+	
+	# Increment loop
+	addi $t1, $t1, -4
+	j move_right_plat_loop
+	
+move_right_plat_end:	# End the loop
+
+	# Restore ra
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+
+
+
+########################################################
+
+move_left_plat:	# Move the bottom layer of platforms
+
+	# Load the parameter
+	addi $sp, $sp, 4
+	lw $t1, 0($sp)
+	
+	# Save ra
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Set 512
+	li $t7, 512
+
+	# Get the base address
+	lw $t0, 0($s0)
+	
+	# Get the start position to check
+	mult $t1, $t7
+	mflo $t1
+	add $t1, $t0, $t1
+	
+	# Get the end position to check
+	addi $t2, $t1, 512
+	
+	# Get the color white
+	li $t3, 0x00ffffff
+	
+	# Get the color black
+	li $t4, 0x00000000
+	
+	# Get the color red
+	li $t5, 0x00ff0000
+	
+move_left_plat_loop:	# Loop to move
+
+	# While the last pixel is not checked
+	beq $t1, $t2, move_left_plat_end
+	
+	# Load the current pixel
+	lw $t6, 0($t1)
+	
+	# If not black skip
+	li $t9, 0x00fe0000
+	beq $t6, $t9, move_left_plat_next_2
+	bne $t6, $t4, move_left_plat_loop_skip
+	
+	# If it's one of the player pixels just don't bother
+	addi $t8, $t1, 512
+	beq $t8, $s1, move_left_plat_next_2
+	
+	addi $t8, $t1, 508
+	beq $t8, $s1, move_left_plat_next_2
+	
+	addi $t8, $t1, 504
+	beq $t8, $s1, move_left_plat_next_2
+	
+	addi $t8, $t1, 0
+	beq $t8, $s1, move_left_plat_next_2
+	
+	addi $t8, $t1, -4
+	beq $t8, $s1, move_left_plat_next_2
+	
+	addi $t8, $t1, -8
+	beq $t8, $s1, move_left_plat_next_2
+	
+	addi $t8, $t1, -512
+	beq $t8, $s1, move_left_plat_next_2
+	
+	addi $t8, $t1, -516
+	beq $t8, $s1, move_left_plat_next_2
+	
+	addi $t8, $t1, -520
+	beq $t8, $s1, move_left_plat_next_2
+	
+move_left_plat_loop_skip:
+	
+	# If the pixel is on the far left
+	sub $t8, $t1, $t0
+	div $t8, $t7
+	mfhi $t8
+	bne $t8, $zero, move_left_plat_next
+	
+	# If the player is in the way
+	addi $t8, $t1, -8
+	beq $t8, $s1, move_left_plat_left_move_player
+	
+	addi $t8, $t1, 504
+	beq $t8, $s1, move_left_plat_left_move_player
+	
+	addi $t8, $t1, 1016
+	beq $t8, $s1, move_left_plat_left_move_player
+	
+	# Check if its gonna copy one of the player pixels
+	addi $t8, $t1, 516
+	beq $t8, $s1, move_left_plat_left_player_no_move
+	
+	addi $t8, $t1, 4
+	beq $t8, $s1, move_left_plat_left_player_no_move
+	
+	addi $t8, $t1, -508
+	beq $t8, $s1, move_left_plat_left_player_no_move
+	
+move_left_plat_left_no_move:	# No move player far left
+
+	# Copy the pixel over
+	sw $t6, 508($t1)
+	
+	# Jump
+	j move_left_plat_next_2
+	
+move_left_plat_left_player_no_move:	# No move but replace with black
+
+	# Copy black over
+	sw $t4, 508($t1)
+	
+	# Jump
+	j move_left_plat_next_2
+	
+move_left_plat_next:	# Not far left path	
+	
+	# If the player is in the way
+	addi $t8, $t1, -520
+	beq $t8, $s1, move_left_plat_move_player
+	
+	addi $t8, $t1, -8
+	beq $t8, $s1, move_left_plat_move_player
+	
+	addi $t8, $t1, 504
+	beq $t8, $s1, move_left_plat_move_player
+	
+	# Check if its gonna copy one of the player pixels
+	addi $t8, $t1, 516
+	beq $t8, $s1, move_left_plat_player_no_move
+	
+	addi $t8, $t1, 4
+	beq $t8, $s1, move_left_plat_player_no_move
+	
+	addi $t8, $t1, -508
+	beq $t8, $s1, move_left_plat_player_no_move
+	
+move_left_plat_no_move:
+
+	# Copy the pixel over
+	sw $t6, -4($t1)
+	
+	# Jump
+	j move_left_plat_next_2
+	
+move_left_plat_player_no_move:	# No move but replace with black
+
+	# Copy black over
+	sw $t4, -4($t1)
+	
+	# Jump
+	j move_left_plat_next_2
+	
+move_left_plat_left_move_player:	# Player in the way but far left
+
+	# If the pixel is red
+	beq $t6, $t5, game_over
+
+	# Save registers
+	sw $t0, 0($sp)
+	sw $t1, -4($sp)
+	sw $t2, -8($sp)
+	addi $sp, $sp, 12
+
+	# Move
+	jal move_left
+	
+	# Restore registers
+	addi $sp, $sp, -12
+	lw $t0, 0($sp)
+	lw $t1, -4($sp)
+	lw $t2, -8($sp)
+	
+	j move_left_plat_left_no_move
+	
+move_left_plat_move_player:	# Move the player in the way
+
+	# If the pixel is red
+	beq $t6, $t5, game_over
+	
+	# Check specific position
+	sub $t8, $t1, $t0
+	div $t8, $t7
+	mfhi $t8
+	li $t9, 12
+	ble $t8, $t9, move_left_plat_end
+
+	# Save registers
+	sw $t0, 0($sp)
+	sw $t1, -4($sp)
+	sw $t2, -8($sp)
+	addi $sp, $sp, 12
+
+	# Move
+	jal move_left
+	
+	# Restore registers
+	addi $sp, $sp, -12
+	lw $t0, 0($sp)
+	lw $t1, -4($sp)
+	lw $t2, -8($sp)
+	
+	j move_left_plat_no_move
+		
+move_left_plat_next_2: # Comparing the pixels
+	
+	# Increment loop
+	addi $t1, $t1, 4
+	j move_left_plat_loop
+	
+move_left_plat_end:	# End the loop
+
+	# Restore ra
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+	
+	
+
+########################################################
+
+draw_plat_row:	# Draw a row of platforms
+
+	# Pop the color
+	addi $sp, $sp, 4
+	lw $t7, 0($sp)
+
+	# Pop the start offset
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+
+	# Pop the space size
+	addi $sp, $sp, 4
+	lw $t1, 0($sp)
+
+	# Pop the plat size
+	addi $sp, $sp, 4
+	lw $t2, 0($sp)
+
+	# Pop the row number
+	addi $sp, $sp, 4
+	lw $t3, 0($sp)
+	
+	# Get the starting position
+	li $t4, 512
+	mult $t3, $t4
+	mflo $t3
+	li $t4, 4
+	mult $t0, $t4
+	mflo $t4
+	add $t3, $t3, $t4
+	lw $t5, 0($s0)
+	add $t0, $t3, $t5
+	
+	# Get the end position
+	addi $t5, $t0, 512
+	sub $t4, $t5, $t4
+	
+	# Set the plat and space trackers
+	add $t5, $t2, $zero
+	add $t6, $t1, $zero
+	
+draw_plat_row_loop:	# Loop for drawing plats
+
+	# End loop
+	beq $t0, $t4, draw_plat_row_loop_end
+
+	# Draw a plat if plat counter isn't 0
+	beq $t5, $zero, draw_plat_row_loop_2
+	sw $t7, 0($t0)
+	addi $t5, $t5, -1
+	j draw_plat_row_loop_4
+	
+draw_plat_row_loop_2:	# Jump to
+	
+	# Space if plat counter is 0
+	addi $t6, $t6, -1
+	beq $t6, $zero, draw_plat_row_loop_3
+	j draw_plat_row_loop_4
+	
+draw_plat_row_loop_3:	# Jump to
+
+	# Reset if both are 0
+	add $t5, $t2, $zero
+	add $t6, $t1, $zero
+	
+draw_plat_row_loop_4:
+
+	# Next loop
+	addi $t0, $t0, 4
+	j draw_plat_row_loop
+	
+draw_plat_row_loop_end:	# End of loop
+
+	# Return
+	jr $ra
+	
+	
+	
+########################################################
+
+draw_plat_col:	# Draw a row of platforms
+
+	# Pop the color
+	addi $sp, $sp, 4
+	lw $t7, 0($sp)
+
+	# Pop the start offset
+	addi $sp, $sp, 4
+	lw $t0, 0($sp)
+
+	# Pop the space size
+	addi $sp, $sp, 4
+	lw $t1, 0($sp)
+
+	# Pop the plat size
+	addi $sp, $sp, 4
+	lw $t2, 0($sp)
+
+	# Pop the row number
+	addi $sp, $sp, 4
+	lw $t3, 0($sp)
+	
+	# Get the starting position
+	li $t4, 4
+	mult $t3, $t4
+	mflo $t3
+	li $t4, 512
+	mult $t0, $t4
+	mflo $t4
+	add $t3, $t3, $t4
+	lw $t5, 0($s0)
+	add $t0, $t3, $t5
+	
+	# Get the end position
+	addi $t5, $t0, 65536
+	sub $t4, $t5, $t4
+	
+	# Set the plat and space trackers
+	add $t5, $t2, $zero
+	add $t6, $t1, $zero
+	
+draw_plat_col_loop:	# Loop for drawing plats
+
+	# End loop
+	beq $t0, $t4, draw_plat_col_loop_end
+
+	# Draw a plat if plat counter isn't 0
+	beq $t5, $zero, draw_plat_col_loop_2
+	sw $t7, 0($t0)
+	addi $t5, $t5, -1
+	j draw_plat_col_loop_4
+	
+draw_plat_col_loop_2:	# Jump to
+	
+	# Space if plat counter is 0
+	addi $t6, $t6, -1
+	beq $t6, $zero, draw_plat_col_loop_3
+	j draw_plat_col_loop_4
+	
+draw_plat_col_loop_3:	# Jump to
+
+	# Reset if both are 0
+	add $t5, $t2, $zero
+	add $t6, $t1, $zero
+	
+draw_plat_col_loop_4:
+
+	# Next loop
+	addi $t0, $t0, 512
+	j draw_plat_col_loop
+	
+draw_plat_col_loop_end:	# End of loop
+
+	# Return
+	jr $ra
+
+
+
+########################################################
+
+
+
+draw_floor:	# Set the bottom line of pixels to white
+
+	# Get the base address
+	lw $t0, 0($s0)
+	
+	# Get the start position
+	addi $t1, $t0, 65024
+	
+	# Get the end position
+	addi $t2, $t0, 65536
+	
+	# Get the color white
+	li $t3, 0x00ffffff
+	
+draw_floor_loop:	# Loop to draw the floor
+
+	# While the last pixel is not reached
+	beq $t1, $t2, draw_floor_end
+	sw $t3, 0($t1)
+	addi $t1, $t1, 4
+	j draw_floor_loop
+	
+draw_floor_end:	# End drawing floor
+
+	# Return
+	jr $ra
+
+########################################################
+
+
+draw_player:	# Set the player pixel to color
+
+	# Check for invuln timer flash
+	lw $t0, 20($s0)
+	li $t1, 8
+	div $t0, $t1
+	mfhi $t1
+	beq $t1, $zero, draw_player_white
+	addi $t1, $t1, -1
+	beq $t1, $zero, draw_player_white
+	addi $t1, $t1, -1
+	beq $t1, $zero, draw_player_white
+	addi $t1, $t1, -1
+	beq $t1, $zero, draw_player_white
+	
+	# Get grey
+	li $t2, 0x00444444
+	j draw_player_set
+
+draw_player_white:	# Draw white
+
+	# Get the color white
+	li $t2, 0x00ffffff
+	
+draw_player_set:	# The setting pixels phase
+	
+	# Set player pixels to color
+	sw $t2, -516($s1)
+	sw $t2, -508($s1)
+	sw $t2, 0($s1)
+	sw $t2, 508($s1)
+	sw $t2, 516($s1)
+	li $t2, 0x00888888
+	sw $t2, -4($s1)
+	sw $t2, -512($s1)
+	sw $t2, 4($s1)
+	sw $t2, 512($s1)
+
+	# Return
+	jr $ra
+	
+######################################################
+
+
+clear_shot:	# Set every pixel to black
+
+	# Get the start address
+	lw $t0, 0($s0)
+	addi $t5, $s4, 0
+	addi $t6, $s5, 0
+	
+	# Get the last pixel offset
+	addi $t1, $t0, 65536
+	
+	# Get the color black
+	li $t2, 0x00000000
+	
+	# Get the clear color
+	li $t3, 0x00fe0000
+	
+clear_shot_loop:	# Loop for clearing
+
+	# While the last pixel is not reached
+	beq $t0, $t1 clear_shot_end
+	
+	# If not blue
+	lw $t4, 0($t5)
+	beq $t4, $t3, clear_shot_clear
+	
+clear_shot_loop_2:
+
+	lw $t4, 0($t6)
+	beq $t4, $t3, clear_shot_clear_2
+	
+clear_shot_loop_3:
+
+	addi $t0, $t0, 512
+	addi $t5, $t5, 512
+	addi $t6, $t6, 512
+	j clear_shot_loop
+	
+clear_shot_end:	# Clearing done
+	
+	# Return
+	jr $ra
+	
+clear_shot_clear:	# Clear
+
+	# Set value
+	sw $t2, 0($t5)
+	j clear_shot_loop_2
+	
+clear_shot_clear_2:	# Clear
+
+	# Set value
+	sw $t2, 0($t6)
+	j clear_shot_loop_3
+
+######################################################
+
+	
+
+clear_screen:	# Set every pixel to black
+
+	# Get the base address
+	lw $t0, 0($s0)
+	
+	# Get the last pixel offset
+	addi $t1, $t0, 65536
+	
+	# Get the color black
+	li $t2, 0x00000000
+	
+clear_screen_loop:	# Loop for clearing
+
+	# While the last pixel is not reached
+	beq $t0, $t1 clear_screen_end
+	sw $t2, 0($t0)
+	addi $t0, $t0, 4
+	j clear_screen_loop
+	
+clear_screen_end:	# Clearing done
+	
+	# Return
+	jr $ra
+	
+	
+
+###########################################################
+
+game_over:	# Game over
+
+	# Wait a bit
+	li $v0 32
+	li $a0 1000
+	syscall
+	
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Set the game over state
+	li $t0, 1
+	sw $t0, 32($s0)
+
+	# Get the base address
+	lw $t0, 0($s0)
+	
+	# Get the last pixel offset
+	addi $t1, $t0, 65024
+	
+	# Get the color black
+	li $t2, 0x00000000
+	
+game_over_loop:	# Loop for clearing
+
+	# While the last pixel is not reached
+	beq $t0, $t1 game_over_loop_end
+	sw $t2, 0($t0)
+	addi $t0, $t0, 4
+	j game_over_loop
+	
+game_over_loop_end:	# Clearing done
+
+	# Draw the dots
+	lw $t0, 0($s0)
+	li $t1, 0x00ffffff
+	sw $t1, 3584($t0)
+	sw $t1, 4092($t0)
+	sw $t1, 7680($t0)
+	sw $t1, 8188($t0)
+	sw $t1, 11776($t0)
+	sw $t1, 12284($t0)
+	sw $t1, 15872($t0)
+	sw $t1, 16380($t0)
+	sw $t1, 19968($t0)
+	sw $t1, 20476($t0)
+	sw $t1, 24064($t0)
+	sw $t1, 24572($t0)
+	sw $t1, 28160($t0)
+	sw $t1, 28668($t0)
+	sw $t1, 32256($t0)
+	sw $t1, 32764($t0)
+	sw $t1, 36352($t0)
+	sw $t1, 36860($t0)
+	sw $t1, 40448($t0)
+	sw $t1, 40956($t0)
+	sw $t1, 44544($t0)
+	sw $t1, 45052($t0)
+	sw $t1, 48640($t0)
+	sw $t1, 49148($t0)
+	sw $t1, 52736($t0)
+	sw $t1, 53244($t0)
+	sw $t1, 56832($t0)
+	sw $t1, 57340($t0)
+	sw $t1, 60928($t0)
+	sw $t1, 61436($t0)
+	
+	# Draw G
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 20
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 12
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 20
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 8
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 23
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 15
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 32
+	sw $t0, 0($sp)
+	li $t0, 12
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 39
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 48
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 15
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 52
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 8
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 20
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 12
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 8
+	sw $t0, 0($sp)
+	li $t0, 32
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 12
+	sw $t0, 0($sp)
+	li $t0, 4
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 12
+	sw $t0, 0($sp)
+	li $t0, 4
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 15
+	sw $t0, 0($sp)
+	li $t0, 26
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 23
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 20
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 32
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 24
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 39
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 31
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 31
+	sw $t0, 0($sp)
+	li $t0, 24
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 32
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# A
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 40
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 20
+	sw $t0, 0($sp)
+	li $t0, 4
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 36
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 20
+	sw $t0, 0($sp)
+	li $t0, 4
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 56
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 23
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 43
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 32
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 43
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 36
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 39
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 43
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 36
+	sw $t0, 0($sp)
+	li $t0, 36
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 40
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 43
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 23
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 43
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 39
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 52
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 23
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 52
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 39
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 59
+	sw $t0, 0($sp)
+	li $t0, 36
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# M
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 80
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 24
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 31
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 80
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 40
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 87
+	sw $t0, 0($sp)
+	li $t0, 40
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 25
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 31
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 80
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 80
+	sw $t0, 0($sp)
+	li $t0, 25
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 31
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# E
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 24
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 92
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 23
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 32
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 39
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 48
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 24
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 92
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 92
+	sw $t0, 0($sp)
+	li $t0, 40
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 99
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 23
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 99
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 39
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 115
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 115
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 32
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 115
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 48
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# O
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 12
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 68
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 8
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 68
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 27
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 15
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 96
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 15
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 99
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 8
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 99
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 27
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 12
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 8
+	sw $t0, 0($sp)
+	li $t0, 32
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 68
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 15
+	sw $t0, 0($sp)
+	li $t0, 26
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 24
+	sw $t0, 0($sp)
+	li $t0, 26
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 31
+	sw $t0, 0($sp)
+	li $t0, 32
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 68
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 12
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 12
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 27
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 27
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# V
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 36
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 88
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 43
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 91
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 36
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 91
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 55
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 99
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 40
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 99
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 51
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 44
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 36
+	sw $t0, 0($sp)
+	li $t0, 28
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 40
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 91
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 43
+	sw $t0, 0($sp)
+	li $t0, 25
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 44
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 51
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 59
+	sw $t0, 0($sp)
+	li $t0, 28
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 91
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 52
+	sw $t0, 0($sp)
+	li $t0, 25
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# E
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 24
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 80
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 87
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 96
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 104
+	sw $t0, 0($sp)
+	li $t0, 24
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 40
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 87
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 87
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 87
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 80
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 87
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 96
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# R
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 21
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 92
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 68
+	sw $t0, 0($sp)
+	li $t0, 4
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 113
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 80
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 83
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 112
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 87
+	sw $t0, 0($sp)
+	li $t0, 6
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 99
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 88
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 112
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 91
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 105
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 92
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 109
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 92
+	sw $t0, 0($sp)
+	li $t0, 40
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 99
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 99
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 87
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 105
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 87
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 109
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 109
+	sw $t0, 0($sp)
+	li $t0, 13
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 91
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 112
+	sw $t0, 0($sp)
+	li $t0, 6
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 83
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 113
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 116
+	sw $t0, 0($sp)
+	li $t0, 15
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 68
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 116
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 88
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# Text
+	lw $t0, 0($s0)
+	li $t1, 0x00ffffff
+	sw $t1, 58944($t0)
+	sw $t1, 58948($t0)
+	sw $t1, 59456($t0)
+	sw $t1, 59464($t0)
+	sw $t1, 59968($t0)
+	sw $t1, 59972($t0)
+	sw $t1, 60480($t0)
+	sw $t1, 60992($t0)
+	
+	sw $t1, 58960($t0)
+	sw $t1, 58964($t0)
+	sw $t1, 59472($t0)
+	sw $t1, 59480($t0)
+	sw $t1, 59984($t0)
+	sw $t1, 59988($t0)
+	sw $t1, 60496($t0)
+	sw $t1, 60504($t0)
+	sw $t1, 61008($t0)
+	sw $t1, 61016($t0)
+	
+	sw $t1, 58976($t0)
+	sw $t1, 58980($t0)
+	sw $t1, 58984($t0)
+	sw $t1, 59488($t0)
+	sw $t1, 60000($t0)
+	sw $t1, 60004($t0)
+	sw $t1, 60008($t0)
+	sw $t1, 60512($t0)
+	sw $t1, 61024($t0)
+	sw $t1, 61028($t0)
+	sw $t1, 61032($t0)
+	
+	sw $t1, 58996($t0)
+	sw $t1, 59000($t0)
+	sw $t1, 59504($t0)
+	sw $t1, 60020($t0)
+	sw $t1, 60536($t0)
+	sw $t1, 61040($t0)
+	sw $t1, 61044($t0)
+	
+	sw $t1, 59012($t0)
+	sw $t1, 59016($t0)
+	sw $t1, 59520($t0)
+	sw $t1, 60036($t0)
+	sw $t1, 60552($t0)
+	sw $t1, 61056($t0)
+	sw $t1, 61060($t0)
+	
+	sw $t1, 59040($t0)
+	sw $t1, 59044($t0)
+	sw $t1, 59552($t0)
+	sw $t1, 59560($t0)
+	sw $t1, 60064($t0)
+	sw $t1, 60068($t0)
+	sw $t1, 60576($t0)
+	sw $t1, 61088($t0)
+	
+	sw $t1, 59072($t0)
+	sw $t1, 59076($t0)
+	sw $t1, 59080($t0)
+	sw $t1, 59588($t0)
+	sw $t1, 60100($t0)
+	sw $t1, 60612($t0)
+	sw $t1, 61124($t0)
+	
+	sw $t1, 59092($t0)
+	sw $t1, 59600($t0)
+	sw $t1, 59608($t0)
+	sw $t1, 60112($t0)
+	sw $t1, 60120($t0)
+	sw $t1, 60624($t0)
+	sw $t1, 60632($t0)
+	sw $t1, 61140($t0)
+	
+	sw $t1, 59120($t0)
+	sw $t1, 59124($t0)
+	sw $t1, 59632($t0)
+	sw $t1, 59640($t0)
+	sw $t1, 60144($t0)
+	sw $t1, 60148($t0)
+	sw $t1, 60656($t0)
+	sw $t1, 60664($t0)
+	sw $t1, 61168($t0)
+	sw $t1, 61176($t0)
+	
+	sw $t1, 59136($t0)
+	sw $t1, 59140($t0)
+	sw $t1, 59144($t0)
+	sw $t1, 59648($t0)
+	sw $t1, 60160($t0)
+	sw $t1, 60164($t0)
+	sw $t1, 60168($t0)
+	sw $t1, 60672($t0)
+	sw $t1, 61184($t0)
+	sw $t1, 61188($t0)
+	sw $t1, 61192($t0)
+	
+	sw $t1, 59156($t0)
+	sw $t1, 59160($t0)
+	sw $t1, 59664($t0)
+	sw $t1, 60180($t0)
+	sw $t1, 60696($t0)
+	sw $t1, 61200($t0)
+	sw $t1, 61204($t0)
+	
+	sw $t1, 59168($t0)
+	sw $t1, 59172($t0)
+	sw $t1, 59176($t0)
+	sw $t1, 59684($t0)
+	sw $t1, 60196($t0)
+	sw $t1, 60708($t0)
+	sw $t1, 61220($t0)
+	
+	sw $t1, 59188($t0)
+	sw $t1, 59696($t0)
+	sw $t1, 59704($t0)
+	sw $t1, 60208($t0)
+	sw $t1, 60212($t0)
+	sw $t1, 60216($t0)
+	sw $t1, 60720($t0)
+	sw $t1, 60728($t0)
+	sw $t1, 61232($t0)
+	sw $t1, 61240($t0)
+	
+	sw $t1, 59200($t0)
+	sw $t1, 59204($t0)
+	sw $t1, 59712($t0)
+	sw $t1, 59720($t0)
+	sw $t1, 60224($t0)
+	sw $t1, 60228($t0)
+	sw $t1, 60736($t0)
+	sw $t1, 60744($t0)
+	sw $t1, 61248($t0)
+	sw $t1, 61256($t0)
+	
+	sw $t1, 59216($t0)
+	sw $t1, 59220($t0)
+	sw $t1, 59224($t0)
+	sw $t1, 59732($t0)
+	sw $t1, 60244($t0)
+	sw $t1, 60756($t0)
+	sw $t1, 61268($t0)
+	
+	sw $t1, 61280($t0)
+	sw $t1, 61296($t0)
+	sw $t1, 61312($t0)
+	sw $t1, 61328($t0)
+	sw $t1, 61344($t0)
+	sw $t1, 61360($t0)
+	
+	# Spawn the player pixel
+	addi $s1, $t0, 61960
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
+
+
+
+###########################################################
+
+win_game:	# Game over
+
+	# Wait a bit
+	li $v0 32
+	li $a0 1000
+	syscall
+	
+	# Save return
+	sw $ra, 0($sp)
+	addi $sp, $sp, -4
+	
+	# Set the game over state
+	li $t0, 1
+	sw $t0, 32($s0)
+
+	# Get the base address
+	lw $t0, 0($s0)
+	
+	# Get the last pixel offset
+	addi $t1, $t0, 65024
+	
+	# Get the color black
+	li $t2, 0x00000000
+	
+win_game_loop:	# Loop for clearing
+
+	# While the last pixel is not reached
+	beq $t0, $t1 win_game_loop_end
+	sw $t2, 0($t0)
+	addi $t0, $t0, 4
+	j win_game_loop
+	
+win_game_loop_end:	# Clearing done
+
+	# Draw the dots
+	lw $t0, 0($s0)
+	li $t1, 0x00ffffff
+	sw $t1, 3584($t0)
+	sw $t1, 4092($t0)
+	sw $t1, 7680($t0)
+	sw $t1, 8188($t0)
+	sw $t1, 11776($t0)
+	sw $t1, 12284($t0)
+	sw $t1, 15872($t0)
+	sw $t1, 16380($t0)
+	sw $t1, 19968($t0)
+	sw $t1, 20476($t0)
+	sw $t1, 24064($t0)
+	sw $t1, 24572($t0)
+	sw $t1, 28160($t0)
+	sw $t1, 28668($t0)
+	sw $t1, 32256($t0)
+	sw $t1, 32764($t0)
+	sw $t1, 36352($t0)
+	sw $t1, 36860($t0)
+	sw $t1, 40448($t0)
+	sw $t1, 40956($t0)
+	sw $t1, 44544($t0)
+	sw $t1, 45052($t0)
+	sw $t1, 48640($t0)
+	sw $t1, 49148($t0)
+	sw $t1, 52736($t0)
+	sw $t1, 53244($t0)
+	sw $t1, 56832($t0)
+	sw $t1, 57340($t0)
+	sw $t1, 60928($t0)
+	sw $t1, 61436($t0)
+	
+	# Y
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 36
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 24
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 27
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 31
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 31
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 35
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 28
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 20
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 27
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 28
+	sw $t0, 0($sp)
+	li $t0, 25
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 31
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 35
+	sw $t0, 0($sp)
+	li $t0, 25
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 31
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 36
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 43
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# O
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 56
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 20
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 20
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 23
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 59
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 48
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 59
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 51
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 51
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 55
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 56
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 52
+	sw $t0, 0($sp)
+	li $t0, 32
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 56
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 56
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 51
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 59
+	sw $t0, 0($sp)
+	li $t0, 26
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 23
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 68
+	sw $t0, 0($sp)
+	li $t0, 26
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 23
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 51
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 75
+	sw $t0, 0($sp)
+	li $t0, 32
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# U
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 84
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 16
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 100
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 46
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 91
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 52
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 84
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 52
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 103
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 56
+	sw $t0, 0($sp)
+	li $t0, 16
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 88
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 84
+	sw $t0, 0($sp)
+	li $t0, 36
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 88
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 91
+	sw $t0, 0($sp)
+	li $t0, 31
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 100
+	sw $t0, 0($sp)
+	li $t0, 31
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 107
+	sw $t0, 0($sp)
+	li $t0, 36
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 16
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# W
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 36
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 88
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 27
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 95
+	sw $t0, 0($sp)
+	li $t0, 10
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 27
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 20
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 36
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 20
+	sw $t0, 0($sp)
+	li $t0, 40
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 27
+	sw $t0, 0($sp)
+	li $t0, 25
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 27
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 95
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 36
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 95
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 36
+	sw $t0, 0($sp)
+	li $t0, 25
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 43
+	sw $t0, 0($sp)
+	li $t0, 40
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# I
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 24
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 71
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 67
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 96
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 67
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 96
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 24
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 52
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 52
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 52
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 96
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 60
+	sw $t0, 0($sp)
+	li $t0, 26
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 67
+	sw $t0, 0($sp)
+	li $t0, 26
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 71
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 75
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 96
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 75
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	# N
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 84
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 64
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 100
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 72
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 91
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 80
+	sw $t0, 0($sp)
+	li $t0, 6
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 95
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 87
+	sw $t0, 0($sp)
+	li $t0, 6
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 91
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 95
+	sw $t0, 0($sp)
+	li $t0, 5
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 96
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 100
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 103
+	sw $t0, 0($sp)
+	li $t0, 8
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 84
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_row
+	
+	li $t0, 84
+	sw $t0, 0($sp)
+	li $t0, 40
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 91
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 91
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 87
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 95
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 72
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 96
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 87
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 100
+	sw $t0, 0($sp)
+	li $t0, 17
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 100
+	sw $t0, 0($sp)
+	li $t0, 9
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 95
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+	
+	li $t0, 108
+	sw $t0, 0($sp)
+	li $t0, 40
+	sw $t0, -4($sp)
+	li $t0, 128
+	sw $t0, -8($sp)
+	li $t0, 64
+	sw $t0, -12($sp)
+	li $t0, 0x00ffffff
+	sw $t0, -16($sp)
+	addi $sp, $sp, -20
+	jal draw_plat_col
+
+	# Text
+	lw $t0, 0($s0)
+	li $t1, 0x00ffffff
+	sw $t1, 58944($t0)
+	sw $t1, 58948($t0)
+	sw $t1, 59456($t0)
+	sw $t1, 59464($t0)
+	sw $t1, 59968($t0)
+	sw $t1, 59972($t0)
+	sw $t1, 60480($t0)
+	sw $t1, 60992($t0)
+	
+	sw $t1, 58960($t0)
+	sw $t1, 58964($t0)
+	sw $t1, 59472($t0)
+	sw $t1, 59480($t0)
+	sw $t1, 59984($t0)
+	sw $t1, 59988($t0)
+	sw $t1, 60496($t0)
+	sw $t1, 60504($t0)
+	sw $t1, 61008($t0)
+	sw $t1, 61016($t0)
+	
+	sw $t1, 58976($t0)
+	sw $t1, 58980($t0)
+	sw $t1, 58984($t0)
+	sw $t1, 59488($t0)
+	sw $t1, 60000($t0)
+	sw $t1, 60004($t0)
+	sw $t1, 60008($t0)
+	sw $t1, 60512($t0)
+	sw $t1, 61024($t0)
+	sw $t1, 61028($t0)
+	sw $t1, 61032($t0)
+	
+	sw $t1, 58996($t0)
+	sw $t1, 59000($t0)
+	sw $t1, 59504($t0)
+	sw $t1, 60020($t0)
+	sw $t1, 60536($t0)
+	sw $t1, 61040($t0)
+	sw $t1, 61044($t0)
+	
+	sw $t1, 59012($t0)
+	sw $t1, 59016($t0)
+	sw $t1, 59520($t0)
+	sw $t1, 60036($t0)
+	sw $t1, 60552($t0)
+	sw $t1, 61056($t0)
+	sw $t1, 61060($t0)
+	
+	sw $t1, 59040($t0)
+	sw $t1, 59044($t0)
+	sw $t1, 59552($t0)
+	sw $t1, 59560($t0)
+	sw $t1, 60064($t0)
+	sw $t1, 60068($t0)
+	sw $t1, 60576($t0)
+	sw $t1, 61088($t0)
+	
+	sw $t1, 59072($t0)
+	sw $t1, 59076($t0)
+	sw $t1, 59080($t0)
+	sw $t1, 59588($t0)
+	sw $t1, 60100($t0)
+	sw $t1, 60612($t0)
+	sw $t1, 61124($t0)
+	
+	sw $t1, 59092($t0)
+	sw $t1, 59600($t0)
+	sw $t1, 59608($t0)
+	sw $t1, 60112($t0)
+	sw $t1, 60120($t0)
+	sw $t1, 60624($t0)
+	sw $t1, 60632($t0)
+	sw $t1, 61140($t0)
+	
+	sw $t1, 59120($t0)
+	sw $t1, 59124($t0)
+	sw $t1, 59632($t0)
+	sw $t1, 59640($t0)
+	sw $t1, 60144($t0)
+	sw $t1, 60148($t0)
+	sw $t1, 60656($t0)
+	sw $t1, 60664($t0)
+	sw $t1, 61168($t0)
+	sw $t1, 61176($t0)
+	
+	sw $t1, 59136($t0)
+	sw $t1, 59140($t0)
+	sw $t1, 59144($t0)
+	sw $t1, 59648($t0)
+	sw $t1, 60160($t0)
+	sw $t1, 60164($t0)
+	sw $t1, 60168($t0)
+	sw $t1, 60672($t0)
+	sw $t1, 61184($t0)
+	sw $t1, 61188($t0)
+	sw $t1, 61192($t0)
+	
+	sw $t1, 59156($t0)
+	sw $t1, 59160($t0)
+	sw $t1, 59664($t0)
+	sw $t1, 60180($t0)
+	sw $t1, 60696($t0)
+	sw $t1, 61200($t0)
+	sw $t1, 61204($t0)
+	
+	sw $t1, 59168($t0)
+	sw $t1, 59172($t0)
+	sw $t1, 59176($t0)
+	sw $t1, 59684($t0)
+	sw $t1, 60196($t0)
+	sw $t1, 60708($t0)
+	sw $t1, 61220($t0)
+	
+	sw $t1, 59188($t0)
+	sw $t1, 59696($t0)
+	sw $t1, 59704($t0)
+	sw $t1, 60208($t0)
+	sw $t1, 60212($t0)
+	sw $t1, 60216($t0)
+	sw $t1, 60720($t0)
+	sw $t1, 60728($t0)
+	sw $t1, 61232($t0)
+	sw $t1, 61240($t0)
+	
+	sw $t1, 59200($t0)
+	sw $t1, 59204($t0)
+	sw $t1, 59712($t0)
+	sw $t1, 59720($t0)
+	sw $t1, 60224($t0)
+	sw $t1, 60228($t0)
+	sw $t1, 60736($t0)
+	sw $t1, 60744($t0)
+	sw $t1, 61248($t0)
+	sw $t1, 61256($t0)
+	
+	sw $t1, 59216($t0)
+	sw $t1, 59220($t0)
+	sw $t1, 59224($t0)
+	sw $t1, 59732($t0)
+	sw $t1, 60244($t0)
+	sw $t1, 60756($t0)
+	sw $t1, 61268($t0)
+	
+	sw $t1, 61280($t0)
+	sw $t1, 61296($t0)
+	sw $t1, 61312($t0)
+	sw $t1, 61328($t0)
+	sw $t1, 61344($t0)
+	sw $t1, 61360($t0)
+	
+	# Spawn the player pixel
+	addi $s1, $t0, 61960
+	
+	# Draw lives text L
+	sw $t3, 1032($t0)
+	sw $t3, 1544($t0)
+	sw $t3, 2056($t0)
+	sw $t3, 2568($t0)
+	sw $t3, 3080($t0)
+	sw $t3, 3084($t0)
+	sw $t3, 3088($t0)
+	
+	# Draw lives text I
+	sw $t3, 1048($t0)
+	sw $t3, 1052($t0)
+	sw $t3, 1056($t0)
+	sw $t3, 1564($t0)
+	sw $t3, 2076($t0)
+	sw $t3, 2588($t0)
+	sw $t3, 3096($t0)
+	sw $t3, 3100($t0)
+	sw $t3, 3104($t0)
+	
+	# Draw lives text V
+	sw $t3, 1064($t0)
+	sw $t3, 1576($t0)
+	sw $t3, 2088($t0)
+	sw $t3, 1072($t0)
+	sw $t3, 1584($t0)
+	sw $t3, 2096($t0)
+	sw $t3, 2604($t0)
+	sw $t3, 3116($t0)
+	
+	# Draw lives text E
+	sw $t3, 1080($t0)
+	sw $t3, 1084($t0)
+	sw $t3, 1088($t0)
+	sw $t3, 1592($t0)
+	sw $t3, 2104($t0)
+	sw $t3, 2108($t0)
+	sw $t3, 2112($t0)
+	sw $t3, 2616($t0)
+	sw $t3, 3128($t0)
+	sw $t3, 3132($t0)
+	sw $t3, 3136($t0)
+	
+	# Draw lives text S
+	sw $t3, 1100($t0)
+	sw $t3, 1104($t0)
+	sw $t3, 1608($t0)
+	sw $t3, 2124($t0)
+	sw $t3, 2640($t0)
+	sw $t3, 3144($t0)
+	sw $t3, 3148($t0)
+	jal draw_lives
+	
+	# Return
+	addi $sp, $sp, 4
+	lw $ra, 0($sp)
+	jr $ra
